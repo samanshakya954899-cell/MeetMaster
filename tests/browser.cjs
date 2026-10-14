@@ -1,0 +1,63 @@
+// Optional browser acceptance checks. Uses an isolated temporary SQLite database.
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { spawn } = require('node:child_process');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+
+(async () => {
+  const python = process.env.PYTHON || 'python';
+  const service = spawn(python, ['-u', '-c', "import server, tempfile; from pathlib import Path; from http.server import ThreadingHTTPServer; task_dir=tempfile.TemporaryDirectory(); server.DB=Path(task_dir.name)/'browser.sqlite3'; server.initialize(); print('READY',flush=True); ThreadingHTTPServer(('127.0.0.1',8788),server.Handler).serve_forever()"], {cwd:path.resolve(__dirname,'..'),stdio:['ignore','pipe','pipe']});
+  let browser;
+  try {
+    await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Test server startup timed out')),15000); service.stdout.on('data',data=>{if(data.toString().includes('READY')){clearTimeout(timer);resolve();}});service.on('error',reject);service.on('exit',code=>reject(new Error(`Test server exited: ${code}`)));});
+    browser=await chromium.launch({headless:true,channel:process.env.BROWSER_CHANNEL || 'msedge'});
+    const page=await browser.newPage({viewport:{width:1600,height:960}});
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto('http://127.0.0.1:8788');
+    await page.getByRole('heading',{name:'Your next great conversation starts here'}).waitFor();
+    await page.getByRole('link',{name:'Agents',exact:true}).click();
+    await page.getByRole('button',{name:'+ Create agent'}).click();
+    await page.getByLabel('Agent name').fill('Product Review');
+    await page.getByLabel('Description',{exact:true}).fill('Focus on decisions and owners.');
+    await page.getByLabel('Tags (comma separated)').fill('Product, Action items');
+    await page.getByRole('button',{name:'Create agent',exact:true}).click();
+    await page.getByRole('heading',{name:'Product Review'}).waitFor();
+    await page.reload();await page.getByRole('heading',{name:'Product Review'}).waitFor();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('button',{name:'Import transcript',exact:true}).click();
+    await page.getByLabel('Meeting title').fill('Product launch review');
+    await page.getByLabel('Transcript',{exact:true}).fill('Ana: We agreed to launch Friday.\nBen: I will finish the release checklist by Thursday.\nAna: The rollout should start with the pilot group.');
+    await page.getByLabel('Meeting agent').selectOption({label:'Product Review'});
+    await page.getByRole('checkbox').check();
+    await page.getByRole('dialog').getByRole('button',{name:'Import transcript',exact:true}).click();
+    await page.getByRole('heading',{name:'Product launch review'}).waitFor();
+    await page.getByRole('button',{name:'Extract source lines'}).click();
+    await page.getByText('Extracted transcript lines · keyword matching, not an AI summary',{exact:true}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'Generate AI notes'}).isEnabled(),false);
+    const artifacts=path.resolve(__dirname,'../artifacts');await fs.mkdir(artifacts,{recursive:true});
+    await page.screenshot({path:path.join(artifacts,'meeting-detail.png'),fullPage:true});
+    await page.getByRole('link',{name:'History',exact:true}).click();
+    await page.getByRole('textbox',{name:'Search meetings and transcripts'}).fill('checklist');
+    await page.getByRole('heading',{name:'Product launch review'}).waitFor();
+    await page.getByRole('textbox',{name:'Search meetings and transcripts'}).fill('does-not-exist');
+    await page.getByRole('heading',{name:'No matching meetings'}).waitFor();
+    await page.getByRole('link',{name:'Account & User Access',exact:true}).click();
+    await page.getByLabel('Full name').fill('Workspace Tester');
+    await page.getByLabel('Company or workspace name').fill('Product Studio');
+    await page.getByRole('button',{name:'Save profile ✓'}).click();
+    await page.getByRole('heading',{name:'Workspace Tester'}).waitFor();
+    await page.getByRole('link',{name:'Billing & Wallet',exact:true}).click();
+    assert.equal(await page.getByRole('button',{name:'Payment provider not configured'}).isEnabled(),false);
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
+    await page.screenshot({path:path.join(artifacts,'dashboard-test-data.png'),fullPage:true});
+    await page.setViewportSize({width:390,height:844});
+    await page.screenshot({path:path.join(artifacts,'mobile-test-data.png'),fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+    await page.getByRole('link',{name:'Agents',exact:true}).click();
+    await page.screenshot({path:path.join(artifacts,'mobile-agents-test-data.png'),fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+    assert.deepEqual(errors,[]);
+    console.log('Browser checks passed: agent creation and persistence, transcript import, note extraction, search, profile save, integration limits, desktop/mobile layouts.');
+  } finally {if(browser)await browser.close();service.kill();}
+})().catch(error=>{console.error(error);process.exitCode=1;});
